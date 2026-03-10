@@ -3,6 +3,7 @@ import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Text, Line, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import { SYSTEMS, JUMP_LANES, getConnections } from '../../shared/galaxy.js';
+import PlayerShip from './ShipModel';
 
 // Scale galaxy coordinates into 3D space
 const SCALE = 0.01;
@@ -209,6 +210,12 @@ function GalaxyScene({ player }) {
           isReachable={connections.includes(sys.id)}
         />
       ))}
+
+      {/* Player Ship */}
+      <PlayerShip
+        shipId={player.ship}
+        systemPosition={systemPositions[player.system_id]}
+      />
 
       {/* Nebula fog */}
       <fog attach="fog" args={['#06060c', 3, 12]} />
