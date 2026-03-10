@@ -2,16 +2,24 @@
   "name": "space-online",
   "version": "0.1.0",
   "description": "MMO space exploration and trading sim",
-  "main": "server/index.js",
   "type": "module",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server/index.js"
   },
   "author": "Hunter Bastian",
   "license": "ISC",
   "dependencies": {
-    "better-sqlite3": "^12.6.2",
-    "ws": "^8.19.0"
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.5.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.4",
+    "vite": "^7.3.1"
   }
 }
