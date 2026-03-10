@@ -515,29 +515,20 @@
 
 <script type="module">
 import { SYSTEMS, JUMP_LANES, getConnections, COMMODITIES } from '/shared/galaxy.js';
-import { SHIPS, MANUFACTURERS, RARITY_COLORS, getCargoCapacity, getCargoUsed } from '/shared/ships.js';
+import { SHIPS, MANUFACTURERS, RARITY_COLORS, SHIP_DEALERS, getCargoCapacity, getCargoUsed } from '/shared/ships.js';
 
 // ── State ─────────────────────────────────────
 
-let ws = null;
 let player = null;
-let market = [];
-let connections = [];
-let playersInSystem = [];
+let marketPrices = {};  // { systemId: { commodityId: { price, supply } } }
+let playersInSystem = []; // placeholder for future MMO
 let currentSystem = null;
-let availableShips = [];
 
 const $ = (s) => document.querySelector(s);
 const canvas = $('#canvas');
 const ctx = canvas.getContext('2d');
 
 // ── Helpers ───────────────────────────────────
-
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
 
 function createEl(tag, attrs = {}, children = []) {
   const el = document.createElement(tag);
@@ -555,88 +546,189 @@ function createEl(tag, attrs = {}, children = []) {
   return el;
 }
 
-// ── Login ─────────────────────────────────────
+// ── Save / Load (localStorage) ────────────────
 
-function connect(name) {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}`);
+const SAVE_KEY = 'space-online-save';
 
-  ws.onopen = () => {
-    const savedId = localStorage.getItem('space-online-id');
-    ws.send(JSON.stringify({ type: 'login', name, playerId: savedId }));
+function saveGame() {
+  const data = {
+    player,
+    marketPrices,
+    version: 1,
   };
-
-  ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
-  ws.onclose = () => showToast('Connection lost. Refresh to reconnect.', true);
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
 }
 
+function loadGame() {
+  const raw = localStorage.getItem(SAVE_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// ── Market Generation ─────────────────────────
+
+function getSystemPriceModifier(systemType, commodityId) {
+  const modifiers = {
+    hub:        { fuel: 1.0, ore: 1.1, electronics: 0.9, weapons: 1.2, food: 0.9, medicine: 0.9, luxuries: 1.0, scrap: 1.1 },
+    industrial: { fuel: 0.8, ore: 0.6, electronics: 1.2, weapons: 1.0, food: 1.1, medicine: 1.1, luxuries: 1.5, scrap: 0.7 },
+    trade:      { fuel: 1.1, ore: 1.2, electronics: 0.8, weapons: 1.3, food: 0.8, medicine: 0.8, luxuries: 0.7, scrap: 1.2 },
+    frontier:   { fuel: 1.3, ore: 0.9, electronics: 1.4, weapons: 0.6, food: 1.3, medicine: 1.3, luxuries: 1.8, scrap: 0.5 },
+    military:   { fuel: 0.9, ore: 1.0, electronics: 1.0, weapons: 0.8, food: 1.0, medicine: 0.7, luxuries: 1.4, scrap: 1.0 },
+    unknown:    { fuel: 1.5, ore: 0.7, electronics: 1.1, weapons: 1.1, food: 1.5, medicine: 1.5, luxuries: 0.5, scrap: 0.3 },
+  };
+  return (modifiers[systemType]?.[commodityId] ?? 1.0) * (0.85 + Math.random() * 0.3);
+}
+
+function generateAllMarkets() {
+  const prices = {};
+  for (const system of SYSTEMS) {
+    prices[system.id] = {};
+    for (const commodity of COMMODITIES) {
+      const modifier = getSystemPriceModifier(system.type, commodity.id);
+      prices[system.id][commodity.id] = {
+        price: Math.round(commodity.basePrice * modifier),
+        supply: Math.floor(50 + Math.random() * 100),
+      };
+    }
+  }
+  return prices;
+}
+
+function fluctuatePrices() {
+  for (const systemId in marketPrices) {
+    for (const commodityId in marketPrices[systemId]) {
+      const row = marketPrices[systemId][commodityId];
+      const commodity = COMMODITIES.find(c => c.id === commodityId);
+      if (!commodity) continue;
+      const change = 1 + (Math.random() - 0.5) * commodity.volatility * 0.1;
+      row.price = Math.max(1, Math.round(row.price * change));
+      row.supply = Math.max(0, row.supply + Math.floor((Math.random() - 0.45) * 5));
+    }
+  }
+  saveGame();
+  if (player) renderMarket(); // refresh if visible
+}
+
+setInterval(fluctuatePrices, 30000);
+
+// ── Game Actions ──────────────────────────────
+
+function jumpTo(systemId) {
+  const connections = getConnections(player.system_id);
+  if (!connections.includes(systemId)) {
+    showToast('No jump lane to that system.', true);
+    return;
+  }
+  player.system_id = systemId;
+  currentSystem = SYSTEMS.find(s => s.id === systemId);
+  saveGame();
+  updateUI();
+  showToast(`Jumped to ${currentSystem.name}`);
+}
+
+function buy(commodityId) {
+  const capacity = getCargoCapacity(player.ship);
+  const used = getCargoUsed(player.cargo);
+  if (used + 1 > capacity) {
+    showToast(`Cargo full! ${used}/${capacity} units.`, true);
+    return;
+  }
+  const row = marketPrices[player.system_id]?.[commodityId];
+  if (!row || row.supply < 1) {
+    showToast('Not enough supply.', true);
+    return;
+  }
+  if (player.credits < row.price) {
+    showToast('Not enough credits.', true);
+    return;
+  }
+  player.credits -= row.price;
+  player.cargo[commodityId] = (player.cargo[commodityId] || 0) + 1;
+  row.supply -= 1;
+  saveGame();
+  updateUI();
+  showToast('Purchase complete');
+}
+
+function sell(commodityId) {
+  if (!player.cargo[commodityId] || player.cargo[commodityId] < 1) {
+    showToast('Nothing to sell.', true);
+    return;
+  }
+  const row = marketPrices[player.system_id]?.[commodityId];
+  if (!row) return;
+  player.credits += row.price;
+  player.cargo[commodityId] -= 1;
+  if (player.cargo[commodityId] <= 0) delete player.cargo[commodityId];
+  row.supply += 1;
+  saveGame();
+  updateUI();
+  showToast('Sale complete');
+}
+
+function buyShip(shipId) {
+  const ship = SHIPS[shipId];
+  if (!ship) return;
+  const sys = SYSTEMS.find(s => s.id === player.system_id);
+  const dealerShips = SHIP_DEALERS[sys.type] || [];
+  if (!dealerShips.includes(shipId)) {
+    showToast('This ship isn\'t sold here.', true);
+    return;
+  }
+  if (player.ship === shipId) {
+    showToast('You already fly this ship.', true);
+    return;
+  }
+  const oldShip = SHIPS[player.ship];
+  const tradeInValue = oldShip ? Math.floor(oldShip.price * 0.5) : 0;
+  const finalCost = ship.price - tradeInValue;
+  if (player.credits < finalCost) {
+    showToast(`Need \u00A2${finalCost.toLocaleString()} (after trade-in).`, true);
+    return;
+  }
+  const currentCargo = getCargoUsed(player.cargo);
+  if (currentCargo > ship.stats.cargo) {
+    showToast(`Cargo won't fit! Sell ${currentCargo - ship.stats.cargo} units first.`, true);
+    return;
+  }
+  player.credits -= finalCost;
+  player.ship = shipId;
+  saveGame();
+  updateUI();
+  showToast(`New ship: ${ship.name}!`);
+}
+
+// ── Login ─────────────────────────────────────
+
 $('#login-btn').onclick = () => {
-  const name = $('#name-input').value.trim() || 'Pilot';
-  connect(name);
+  const name = ($('#name-input').value.trim() || 'Pilot').slice(0, 20);
+
+  // Try loading existing save
+  const save = loadGame();
+  if (save && save.player) {
+    player = save.player;
+    player.name = name; // allow name change
+    marketPrices = save.marketPrices || generateAllMarkets();
+  } else {
+    player = {
+      id: crypto.randomUUID(),
+      name,
+      credits: 1000,
+      system_id: 'sol',
+      cargo: {},
+      ship: 'starter',
+    };
+    marketPrices = generateAllMarkets();
+  }
+
+  currentSystem = SYSTEMS.find(s => s.id === player.system_id);
+  saveGame();
+  enterGame();
 };
 
 $('#name-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('#login-btn').click();
 });
-
-// ── Message Handler ───────────────────────────
-
-function handleMessage(msg) {
-  switch (msg.type) {
-    case 'login_ok':
-      player = msg.player;
-      localStorage.setItem('space-online-id', player.id);
-      market = msg.market;
-      connections = msg.galaxy.connections;
-      playersInSystem = msg.players;
-      availableShips = msg.ships || [];
-      currentSystem = SYSTEMS.find(s => s.id === player.system_id);
-      enterGame();
-      break;
-
-    case 'jumped':
-      player = msg.player;
-      connections = msg.connections;
-      market = msg.market;
-      playersInSystem = msg.players;
-      availableShips = msg.ships || [];
-      currentSystem = SYSTEMS.find(s => s.id === player.system_id);
-      updateUI();
-      showToast(`Jumped to ${currentSystem.name}`);
-      break;
-
-    case 'ship_bought':
-      player = msg.player;
-      updateUI();
-      showToast(`New ship: ${msg.ship.name}!`);
-      break;
-
-    case 'trade_ok':
-      player = msg.player;
-      market = msg.market;
-      updateUI();
-      showToast(msg.action === 'buy' ? 'Purchase complete' : 'Sale complete');
-      break;
-
-    case 'player_entered':
-      playersInSystem.push(msg.player);
-      renderPlayers();
-      break;
-
-    case 'player_left':
-      playersInSystem = playersInSystem.filter(p => p.id !== msg.playerId);
-      renderPlayers();
-      break;
-
-    case 'chat':
-      addChatMessage(msg.name, msg.text);
-      break;
-
-    case 'error':
-      showToast(msg.message, true);
-      break;
-  }
-}
 
 // ── Enter Game ────────────────────────────────
 
@@ -645,6 +737,7 @@ function enterGame() {
   $('#game-screen').classList.add('active');
   resizeCanvas();
   updateUI();
+  addChatMessage('SYSTEM', `Welcome to Space Online, ${player.name}.`);
   requestAnimationFrame(renderLoop);
 }
 
@@ -718,41 +811,34 @@ function renderJumpGates() {
   }
 }
 
-function jumpTo(systemId) {
-  ws.send(JSON.stringify({ type: 'jump', systemId }));
-}
-
 function renderMarket() {
   const container = $('#market-list');
   container.replaceChildren();
 
-  for (const row of market) {
-    const c = COMMODITIES.find(c => c.id === row.commodity_id);
-    if (!c) continue;
+  const systemMarket = marketPrices[player.system_id] || {};
+  for (const commodity of COMMODITIES) {
+    const row = systemMarket[commodity.id];
+    if (!row) continue;
 
     const marketRow = createEl('div', { className: 'market-row' }, [
       createEl('div', {}, [
-        createEl('div', { className: 'commodity-name', textContent: c.name }),
+        createEl('div', { className: 'commodity-name', textContent: commodity.name }),
         createEl('div', { className: 'supply', textContent: `Supply: ${row.supply}` }),
       ]),
       createEl('div', { className: 'price', textContent: `\u00A2${Math.round(row.price)}` }),
       createEl('div', { className: 'trade-btns' }, [
-        createEl('button', { className: 'trade-btn buy', textContent: 'BUY', onclick: () => buy(c.id) }),
-        createEl('button', { className: 'trade-btn sell', textContent: 'SELL', onclick: () => sell(c.id) }),
+        createEl('button', { className: 'trade-btn buy', textContent: 'BUY', onclick: () => buy(commodity.id) }),
+        createEl('button', { className: 'trade-btn sell', textContent: 'SELL', onclick: () => sell(commodity.id) }),
       ]),
     ]);
     container.appendChild(marketRow);
   }
 }
 
-function buy(id) { ws.send(JSON.stringify({ type: 'buy', commodityId: id, quantity: 1 })); }
-function sell(id) { ws.send(JSON.stringify({ type: 'sell', commodityId: id, quantity: 1 })); }
-
 function renderCargo() {
   const container = $('#cargo-list');
   container.replaceChildren();
 
-  // Cargo capacity bar
   const capacity = getCargoCapacity(player.ship);
   const used = getCargoUsed(player.cargo);
   const pct = Math.min(100, (used / capacity) * 100);
@@ -800,22 +886,13 @@ function renderPlayers() {
   const container = $('#players-list');
   container.replaceChildren();
 
-  if (playersInSystem.length === 0) {
-    container.appendChild(createEl('div', {
-      textContent: 'No other pilots',
-      style_fontSize: '12px',
-      style_color: 'var(--text-dim)',
-      style_padding: '6px',
-    }));
-    return;
-  }
-
-  for (const p of playersInSystem) {
-    container.appendChild(createEl('div', { className: 'player-row' }, [
-      createEl('div', { className: 'player-dot' }),
-      document.createTextNode(p.name),
-    ]));
-  }
+  // Singleplayer for now — will be populated via WebSocket later
+  container.appendChild(createEl('div', {
+    textContent: 'No other pilots',
+    style_fontSize: '12px',
+    style_color: 'var(--text-dim)',
+    style_padding: '6px',
+  }));
 }
 
 // ── Ship Dealer ───────────────────────────────
@@ -823,6 +900,10 @@ function renderPlayers() {
 function renderShipDealer() {
   const container = $('#ship-list');
   container.replaceChildren();
+
+  const sys = SYSTEMS.find(s => s.id === player.system_id);
+  const dealerShipIds = SHIP_DEALERS[sys.type] || [];
+  const availableShips = dealerShipIds.map(id => SHIPS[id]).filter(Boolean);
 
   if (availableShips.length === 0) {
     container.appendChild(createEl('div', {
@@ -834,7 +915,6 @@ function renderShipDealer() {
     return;
   }
 
-  // Stat max values for bar scaling
   const maxCargo = 200, maxHull = 300, maxFirepower = 60;
 
   for (const ship of availableShips) {
@@ -842,14 +922,12 @@ function renderShipDealer() {
     const mfr = MANUFACTURERS[ship.manufacturer];
     const rarityColor = RARITY_COLORS[ship.rarity] || '#9a9a9a';
 
-    // Trade-in calculation
     const oldShip = SHIPS[player.ship];
     const tradeIn = oldShip ? Math.floor(oldShip.price * 0.5) : 0;
     const finalCost = ship.price - tradeIn;
 
     const card = createEl('div', { className: 'ship-card' + (isEquipped ? ' equipped' : '') });
 
-    // Header: name + rarity
     card.appendChild(createEl('div', { className: 'ship-header' }, [
       createEl('div', { className: 'ship-name', textContent: ship.name, style_color: mfr.color }),
       createEl('div', {
@@ -860,13 +938,9 @@ function renderShipDealer() {
       }),
     ]));
 
-    // Manufacturer
     card.appendChild(createEl('div', { className: 'ship-manufacturer', textContent: mfr.name }));
-
-    // Description
     card.appendChild(createEl('div', { className: 'ship-desc', textContent: ship.description }));
 
-    // Stat bars
     const statDefs = [
       { label: 'Cargo', value: ship.stats.cargo, max: maxCargo, color: '#40a0f0' },
       { label: 'Speed', value: Math.round((1 / ship.stats.speed) * 50), max: 100, color: '#a040d0' },
@@ -889,7 +963,6 @@ function renderShipDealer() {
       ]));
     }
 
-    // Footer: price + buy button
     const footer = createEl('div', { className: 'ship-footer' });
 
     if (isEquipped) {
@@ -921,15 +994,11 @@ function renderShipDealer() {
   }
 }
 
-function buyShip(shipId) {
-  ws.send(JSON.stringify({ type: 'buy_ship', shipId }));
-}
-
-// ── Chat ──────────────────────────────────────
+// ── Chat (local for now, will connect to WS later) ──
 
 $('#chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.value.trim()) {
-    ws.send(JSON.stringify({ type: 'chat', text: e.target.value.trim() }));
+    addChatMessage(player.name, e.target.value.trim());
     e.target.value = '';
   }
 });
@@ -970,7 +1039,6 @@ function resizeCanvas() {
 
 window.addEventListener('resize', resizeCanvas);
 
-// Starfield
 const stars = Array.from({ length: 200 }, () => ({
   x: Math.random(),
   y: Math.random(),
@@ -984,18 +1052,15 @@ function renderLoop(t) {
   const w = canvas.width / devicePixelRatio;
   const h = canvas.height / devicePixelRatio;
 
-  // Clear
   ctx.fillStyle = '#06060c';
   ctx.fillRect(0, 0, w, h);
 
-  // Stars
   for (const star of stars) {
     const twinkle = 0.5 + 0.5 * Math.sin(animTime * star.twinkleSpeed + star.x * 100);
     ctx.fillStyle = `rgba(200, 190, 170, ${star.brightness * twinkle})`;
     ctx.fillRect(star.x * w, star.y * h, star.size, star.size);
   }
 
-  // Nebula glow
   if (currentSystem) {
     const grd = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, w * 0.5);
     grd.addColorStop(0, currentSystem.color + '15');
@@ -1004,7 +1069,6 @@ function renderLoop(t) {
     ctx.fillRect(0, 0, w, h);
   }
 
-  // Map scaling
   const padding = 60;
   const scale = Math.min((w - padding * 2) / 1000, (h - padding * 2) / 800);
   const offsetX = (w - 1000 * scale) / 2;
@@ -1012,7 +1076,6 @@ function renderLoop(t) {
   const mapX = (x) => x * scale + offsetX;
   const mapY = (y) => y * scale + offsetY;
 
-  // Jump lanes — thick outlined lines (Borderlands style)
   for (const [aId, bId] of JUMP_LANES) {
     const a = SYSTEMS.find(s => s.id === aId);
     const b = SYSTEMS.find(s => s.id === bId);
@@ -1023,7 +1086,6 @@ function renderLoop(t) {
       ((aId === player.system_id && getConnections(player.system_id).includes(bId)) ||
        (bId === player.system_id && getConnections(player.system_id).includes(aId)));
 
-    // Black outline
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 5;
     ctx.beginPath();
@@ -1031,7 +1093,6 @@ function renderLoop(t) {
     ctx.lineTo(bx, by);
     ctx.stroke();
 
-    // Inner line
     ctx.strokeStyle = isConnected ? 'rgba(240, 192, 64, 0.5)' : 'rgba(100, 90, 70, 0.25)';
     ctx.lineWidth = 2;
     ctx.setLineDash([8, 6]);
@@ -1042,7 +1103,6 @@ function renderLoop(t) {
     ctx.setLineDash([]);
   }
 
-  // Systems — cel-shaded nodes
   for (const sys of SYSTEMS) {
     const sx = mapX(sys.x);
     const sy = mapY(sys.y);
@@ -1052,7 +1112,6 @@ function renderLoop(t) {
     const pulse = isCurrent ? Math.sin(animTime * 3) * 3 : 0;
     const r = baseRadius + pulse;
 
-    // Glow
     if (isCurrent || isReachable) {
       const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 3);
       glow.addColorStop(0, sys.color + '30');
@@ -1061,25 +1120,21 @@ function renderLoop(t) {
       ctx.fillRect(sx - r * 3, sy - r * 3, r * 6, r * 6);
     }
 
-    // Black outline (thick)
     ctx.beginPath();
     ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
     ctx.fillStyle = '#000';
     ctx.fill();
 
-    // Fill
     ctx.beginPath();
     ctx.arc(sx, sy, r, 0, Math.PI * 2);
     ctx.fillStyle = isCurrent ? sys.color : (isReachable ? sys.color + 'aa' : sys.color + '40');
     ctx.fill();
 
-    // Cel-shade highlight
     ctx.beginPath();
     ctx.arc(sx - r * 0.25, sy - r * 0.3, r * 0.5, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
     ctx.fill();
 
-    // Label
     ctx.font = `bold 12px 'Geist', sans-serif`;
     ctx.textAlign = 'center';
     ctx.strokeStyle = '#000';
@@ -1088,7 +1143,6 @@ function renderLoop(t) {
     ctx.fillStyle = isCurrent ? '#fff' : (isReachable ? '#ccc' : '#666');
     ctx.fillText(sys.name, sx, sy + r + 16);
 
-    // "YOU ARE HERE" indicator
     if (isCurrent) {
       ctx.font = `11px 'Bangers', cursive`;
       ctx.strokeStyle = '#000';
@@ -1099,7 +1153,6 @@ function renderLoop(t) {
     }
   }
 
-  // Cross-hatch overlay (subtle Borderlands texture)
   ctx.globalAlpha = 0.02;
   ctx.strokeStyle = '#fff';
   ctx.lineWidth = 0.5;
