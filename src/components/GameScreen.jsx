@@ -3,8 +3,10 @@ import { SYSTEMS, getConnections, COMMODITIES } from '../../shared/galaxy.js';
 import { SHIPS, MANUFACTURERS, RARITY_COLORS, getCargoCapacity, getCargoUsed } from '../../shared/ships.js';
 import { jumpTo, buyCommodity, sellCommodity, buyShip, sendChat, getCurrentSystem, getAvailableShips, getSystemMarket } from '../store';
 import GalaxyView from './GalaxyView';
+import FlightView from './FlightView';
 
 export default function GameScreen({ state }) {
+  const [viewMode, setViewMode] = useState('map'); // 'map' | 'flight'
   const { player, chatMessages } = state;
   const currentSystem = getCurrentSystem();
   const shipData = SHIPS[player.ship];
@@ -13,6 +15,11 @@ export default function GameScreen({ state }) {
   const connections = getConnections(player.system_id);
   const capacity = getCargoCapacity(player.ship);
   const used = getCargoUsed(player.cargo);
+
+  // Flight mode — full screen 3D
+  if (viewMode === 'flight') {
+    return <FlightView player={player} onExit={() => setViewMode('map')} />;
+  }
 
   return (
     <div className="game-screen">
@@ -31,6 +38,18 @@ export default function GameScreen({ state }) {
       <div className="panel">
         <div className="panel-title">NAVIGATION</div>
         <SystemInfo system={currentSystem} />
+
+        <button
+          onClick={() => setViewMode('flight')}
+          style={{
+            display: 'block', width: '100%', padding: '10px', marginBottom: 12,
+            background: 'var(--accent)', color: '#000', border: '3px solid #000',
+            fontFamily: "'Bangers', cursive", fontSize: 18, letterSpacing: 3,
+            cursor: 'pointer', borderRadius: 3, boxShadow: '2px 2px 0 #000',
+          }}
+        >
+          UNDOCK &amp; FLY
+        </button>
 
         <div className="panel-title">JUMP GATES</div>
         {connections.map(id => {
