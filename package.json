@@ -1,0 +1,17 @@
+{
+  "name": "space-online",
+  "version": "0.1.0",
+  "description": "MMO space exploration and trading sim",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "author": "Hunter Bastian",
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "ws": "^8.19.0"
+  }
+}
